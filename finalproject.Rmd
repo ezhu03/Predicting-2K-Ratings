@@ -1,0 +1,788 @@
+---
+title: "Predicting NBA 2K Ratings"
+author: "Eric Zhu"
+output:
+    html_document:
+      css: style.css
+      toc: true
+      toc_float: true
+      code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+```{r,collapse=TRUE, echo=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(ggplot2)
+library(ggthemes)
+library(kableExtra)
+library(recipes)
+library(discrim)
+library(poissonreg)
+library(corrr)
+library(corrplot)
+library(klaR) # for naive bayes
+library(leaps)
+library(yardstick)
+library(janitor)
+library(naniar)
+library(xgboost)
+library(ranger)
+library(vip)
+library(qwraps2)
+library(glmnet)
+library(parsnip)
+library(generics)
+library(conflicted)
+tidymodels_prefer()
+set.seed(1237)
+```
+
+## Introduction
+
+The goal of our project is to predict the NBA 2K rating of different NBA players based on different known statistics from the previous season. We are able to utilize data that we have from the 2010-11 season onwards to ultimately predict the NBA 2K23 ratings from the 2021-22 season statistics.
+
+![](nba2k23.jpg)
+
+### What is a NBA 2K rating?
+
+NBA 2K is a basketball sports simulation video game developed by Visual Concepts and published by 2K Sports, hence the name NBA 2K. Each year, a new version of the game is released with updates based on any roster changes within the NBA. When a new version is released, players get a 2K rating based on their performance from the previous season, representative of their ability with respect to the rest of the league. Typically, the best players in the league receive ratings in the range of 90 to 99, while the worst players tend to be around 60 to 69. Although an NBA 2K rating itself isn’t any form of accolade, there is a lot of pride between different NBA players to have a higher rating as a metric to compare performance the previous season. Ultimately, with these 2K ratings, fans are able to jump into a game to play with the different NBA players and be one step closer to experiencing what it’s like to being an NBA player. The more accurate the ratings are the better the game, and the more realistic the game feels. Thus, it’s important that NBA 2K come out with accurate ratings that reflect the state of the NBA. For our project, we are focusing on the overall NBA 2K rating, but each player also has ratings for each of the major statistics categories to further differentiate between players within the game.
+
+### What are we trying to do?
+
+For us, we’re trying to see what it’s like to determine the 2K ratings for the next iteration of the game. We want to find out if we’re able to find a model that accurately predicts the 2K ratings, to see what kind of a model the developers are using to determine what the player ratings should be. Of course being such a large company, it is probably an extremely complicated and nuanced model that they use. Thus, we’re trying to figure out what predictors are important for determining an NBA 2K rating, while also examining the effects of the eye test.
+
+
+### What is the eye test?
+
+A common term utilized in NBA player analysis is the eye test, specifically focusing on when players “pass the eye test.” It often refers to certain players being better than their statistics may show, specifically for the players who are able to have a significant impact on the court, but don’t necessarily stuff the stat sheet by putting up impressive numbers. Thus, the eye test refers to the various intangibles that players are able to provide that aren’t able to be quantified. However, NBA 2K being a game centered around numbers and ratings, there needs to be a way to quantify these values, which may just be associated with expert analysis over each players to adjust the final numbers, making it not a purely numeric model.
+
+## Dataset Setup
+
+### Data Loading
+
+For our data, we will use a kaggle dataset of NBA player statistics from 1998 to 2022, focusing simply on 2010 and on. The data for NBA player statistcs can be obtained here: [NBA Player Statistics Data](https://www.kaggle.com/datasets/sadeghjalalian/nba-player-stats-19982022). We are also going to have to take the data given for NBA 2K ratings from past year, which can be obtained here: [2K Ratings Data](https://hoopshype.com/nba2k/). We have to combine our data set by merging on name and year such that one season's statistics for any given player correspond to their 2K Rating in the following year. Thus, any player who does not have a 2K rating or any player with no statistics (rookies playing in their first NBA season) from the previous season will be naturally removed from our dataset.
+
+```{r}
+nba_stats<-read_csv("data/NBA_Player_Stats.csv")
+nba_2kRatings<-read_csv("data/2kRatings.csv")
+nba_data<-merge(nba_stats, nba_2kRatings, by=c("Player","Year"))
+```
+
+### Missing Data
+
+We can then visualize any missing data that we have to figure out if anything needs to be done.
+```{r, echo=FALSE}
+vis_miss(nba_data)+theme(text=element_text(size=8,  family="Avenir"))
+```
+
+With our dataset, it works out well that we don't have any missing values to deal with. 
+
+### Data Pruning
+
+In order to make our data more useful, we are going to filter our dataset by only utilizing players that have played over 20 games, which we consider to be enough to formulate a decent judgement on a players ability just purely from their performance. Obviously, it would be unfair to judge someones ability just from 5 games played if they got injured that season.
+
+```{r}
+nba_data <- nba_data %>%
+  filter(G>20)
+```
+
+We're also going to factor our two categorical variables before we split into training and testing datasets.
+
+```{r}
+nba_data$Year <- factor(nba_data$Year)
+nba_data$Pos <- factor(nba_data$Pos)
+```
+
+### Splitting Train and Test
+
+Rather than using a random split for train and test, we will take all the data from 2010 to 2021 as the training data to serve as prediction for the 2021-2022 season for NBA 2K23 ratings. This way of training will make our model more robust for future as we can utilize it to predict what we think the ratings will be for the upcoming game even before it is actually released.
+
+```{r}
+nba_data_train <- nba_data[which(nba_data$Year != "2021-2022"),]
+nba_data_test <-  nba_data[which(nba_data$Year == "2021-2022"),]
+```
+
+### What are our predictors?
+
+In order to setup our model, we first have to understand what predictors we are utilizing. Our codebook to explain each of the parameters follows.
+
+```{r, echo=FALSE}
+read_csv("nba_codebook.csv") %>%
+  kable(escape = F) %>%
+  kable_styling(full_width = T,font_size=12) %>%
+  scroll_box(width = "100%", height = "200px")
+```
+
+## Exploratory Data Analysis
+
+### Correlation Plot
+
+Let's start by looking at the correlations between our predictors to have a better picture of what values are highly correlated. We would want to avoid picking parameters with high correlation for our model. 
+
+```{r,fig.align='center'}
+select(nba_data,where(is.numeric),-c(Rating)) %>%
+  correlate() %>%
+  network_plot()
+```
+
+As we may expect, FGP, 2PP, and eFG are highly correlated as they all pertain to some form of field goal percentage that involves the 2 point field goals being shot. Most statistics have some form of positive correlation, which can be attributed to the general logic that better players are probably a little better at everything. Of course, there are some players that may be strong in some stats and weak in others, yielding negative correlations in ORB and 3PP, which can likely be explained by the fact that most taller players (centers) that are good at offensive rebounding are likely are worse at 3 point shooting. The reverse can be said about shorter players (guards).
+
+### 2K Rating Histogram
+
+To better visualize the variable we are predicting, we can utilize a histogram to see the distribution of 2K Ratings.
+
+```{r,fig.align='center'}
+ggplot(nba_data, aes(x=Rating))+
+  geom_histogram(color="darkblue", fill="lightblue")+
+  ggtitle("Histogram of NBA 2K Rating")+
+  xlab("2K Rating")+
+  theme(text=element_text(size=12,  family="Avenir"))
+```
+
+We can observe that 2K ratings have a normal distribution about a rating of 75 with an overall range between 50 and 100.
+
+### Points Histogram
+
+We can then look into the easiest metric to determine 2K rating, the number of points scored. As a most general basis, the more points scored, the likely the better the player is, so it is important to understand how it is distributed.
+
+```{r,fig.align='center'}
+ggplot(nba_data, aes(x=PTS))+
+  geom_histogram(color="darkblue", fill="lightblue")+
+  ggtitle("Histogram of Points Scored in NBA")+
+  xlab("PTS")+
+  theme(text=element_text(size=12,  family="Avenir"))
+```
+
+The histogram of points is right skewed with most players lying in the 5 to 15 points per game range. With the effect of NBA stars having a high usage leading to higher and higher points scored, they are likely to be the ones represented in the tail of the right side. 
+
+### 2KRating vs. PTS + REB + AST
+
+To get an idea of what our model might look like, we can utilze the most simple NBA statistics and ploting it against 2K Rating. The easiest metric for evaluating a players ability is summing up their points, rebounds, and assists. We expect better players to have a higher sum. Of course, this doesn't account for the eye test we discussed earlier, as some stars may not contribute necessarily as much in points, rebounds, and assists.
+
+```{r,fig.align='center'}
+ggplot(nba_data, aes(x=PTS+TRB+AST, y=Rating)) +
+  geom_point(size=0.5,color="lightblue") +
+  ggtitle("2KRating vs. Pts + Reb + Ast Per Game") +
+  xlab("Pts + Reb + Ast")+ylab("2KRating")+
+  theme(text=element_text(size=12,  family="Avenir"))
+```
+
+We can see a clear general positive trend between Pts + Reb + Ast and 2K Rating, with a chunk of variability still left unexplained. This gives us a good starting point for our model but also leaves room for improvement when we begin to add additional parameters.
+
+### Parameter Selection
+
+We can begin to figure out what parameters to include in our model by looking at forward stepwise model selection as follows. We eliminate player, team, year, and position as they are variables that we wouldn't want impacting our model.
+
+```{r, echo=FALSE}
+models <- regsubsets(Rating ~ . - Player - Tm - Year - Pos, data = nba_data_train, nvmax = 30,method="forward",really.big=T)
+
+indices <- as.data.frame(summary(models)[1])
+indices[1:27] <- lapply(indices[1:27], function(x) {
+    cell_spec(x, bold = T, 
+              background = ifelse(x == 1, "lightgreen", "lightblue"),
+              color="black")
+})
+
+indices %>%
+  kable(escape = F) %>%
+  kable_styling(full_width = T,font_size=12) %>%
+  scroll_box(width = "100%", height = "400px")
+```
+
+## Recipe Creation
+
+### Initial Recipe
+
+We can make our initial recipe based on our stepwise selection results from before, while taking into consideration what is the most important NBA statistics. We define are model to be as follows, while centering and scaling all parameters.
+
+```{r}
+nba_recipe <- recipe(Rating ~ MP + v_2PP + v_3PP + DRB + AST + STL + BLK + TOV + PF + PTS, data = nba_data_train) %>%
+  step_dummy(all_nominal()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+```
+
+### Large Recipe
+
+We can also make an additional recipe to contain all parameters besides different field goal percentages as they are a result of direct division.
+
+```{r}
+nba_recipe_large <- recipe(Rating ~ Year + Pos + Age + G + GS + MP + FG + FGA + v_3P + v_3PA + v_2P + v_2PA + FT + FTA + ORB + DRB + AST + STL + BLK + TOV + PF + PTS, data = nba_data_train) %>%
+   step_dummy(all_nominal()) %>%
+   step_center(all_predictors()) %>%
+   step_scale(all_predictors())
+```
+
+### Small Recipe
+
+We also can test an additional recipe that is a slightly expanded version of our points, rebounds, and assists, but keeps the model relatively simple.
+
+```{r}
+nba_recipe_small <- recipe(Rating ~ TRB + AST + STL + BLK + TOV + PF + PTS, data = nba_data_train) %>%
+  step_dummy(all_nominal()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+```
+
+### Polynomial Recipe
+
+We can also take our initial recipe and apply a polynomial step to have another factor to be able to vary within the recipe.
+
+```{r}
+nba_recipe_poly <- recipe(Rating ~ MP + v_2PP + v_3PP + DRB + AST + STL + BLK + TOV + PF + PTS, data = nba_data_train) %>%
+  step_dummy(all_nominal()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>%
+  step_poly(all_numeric_predictors(), degree = 4)
+```
+
+### Cross Validation
+
+Finally, we just have to set up cross validation for our data set that we will apply to our model.
+
+```{r}
+nba_folds <- vfold_cv(nba_data_train, v = 5)
+```
+
+## Linear Model
+
+### Default Model
+
+We can first work through the most simple linear model for our default recipe to yield a rmse value for it.
+
+We'll walk through how we set up our model for the first model. In this case we setup the model to be linear regression and set the engine to be `lm`. Next, we set up our workflow to contain our model and recipe.
+
+```{r}
+lm_mod_cv_nba <- linear_reg() %>% 
+  set_engine("lm")
+
+lm_wkflow_cv_nba <- workflow() %>% 
+  add_model(lm_mod_cv_nba) %>% 
+  add_recipe(nba_recipe)
+```
+
+Next we fit our folds to our model and save it so that we don't have to run it while knitting. This is also the step where we'll tune for our more complicated models.
+
+```{r,eval=FALSE}
+tune_res_lm_nba <- lm_wkflow_cv_nba %>% 
+  fit_resamples(resamples = nba_folds)
+
+save(tune_res_lm_nba, file = "tune_res_lm_nba.rda")
+```
+
+Finally, we'll load our model back, show and select the best model based on rmse, and calculate the rmse for the testing dataset.
+
+```{r}
+load("tune_res_lm_nba.rda")
+
+best_lm_nba<-select_best(tune_res_lm_nba,metric="rmse")
+show_best(tune_res_lm_nba,metric="rmse")%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+rmse_vals <- show_best(tune_res_lm_nba,metric="rmse")[3]
+model_vals <- "Linear Regression - Normal"
+
+lm_final_nba <- finalize_workflow(lm_wkflow_cv_nba, best_lm_nba)
+
+lm_final_nba <- fit(lm_final_nba, 
+                        data = nba_data_train)
+
+results <- augment(lm_final_nba, new_data = nba_data_test)
+
+rmse_test <- rmse_vec(truth = results$Rating, estimate = round(results$.pred))
+  
+```
+
+### Small Model
+
+We can next do the same linear regression but on our smaller model, which yields the following rmse for the models.
+
+```{r, echo=FALSE}
+lm_mod_cv_nba_small <- linear_reg() %>% 
+  set_engine("lm")
+
+lm_wkflow_cv_nba_small <- workflow() %>% 
+  add_model(lm_mod_cv_nba_small) %>% 
+  add_recipe(nba_recipe_small)
+```
+
+```{r, eval=FALSE, echo=FALSE }
+tune_res_lm_nba_small <- lm_wkflow_cv_nba_small %>% 
+  fit_resamples(resamples = nba_folds)
+
+save(tune_res_lm_nba_small, file = "tune_res_lm_nba_small.rda")
+```
+
+```{r, echo=FALSE}
+load("tune_res_lm_nba_small.rda")
+
+show_best(tune_res_lm_nba_small,metric="rmse")%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+best_lm_nba_small<-select_best(tune_res_lm_nba_small,metric="rmse")
+
+rmse_vals <- append(rmse_vals,show_best(tune_res_lm_nba_small,metric="rmse")[3])
+model_vals <- append(model_vals, "Linear Regression - Small")
+
+lm_final_nba_small <- finalize_workflow(lm_wkflow_cv_nba_small, best_lm_nba_small)
+
+lm_final_nba_small <- fit(lm_final_nba_small, 
+                        data = nba_data_train)
+
+results <- augment(lm_final_nba_small, new_data = nba_data_test)
+
+rmse_test <- append(rmse_test,rmse_vec(truth = results$Rating, estimate = round(results$.pred)))
+  
+```
+
+### Large Model
+
+We can do the same thing again for the large model to yield the model with the following RMSE.
+
+```{r, echo=FALSE}
+lm_mod_cv_nba_large <- linear_reg() %>% 
+  set_engine("lm")
+
+lm_wkflow_cv_nba_large <- workflow() %>% 
+  add_model(lm_mod_cv_nba_large) %>% 
+  add_recipe(nba_recipe_large)
+```
+
+```{r, eval = FALSE, echo=FALSE}
+tune_res_lm_nba_large <- lm_wkflow_cv_nba_large %>% 
+  fit_resamples(resamples = nba_folds)
+
+save(tune_res_lm_nba_large, file = "tune_res_lm_nba_large.rda")
+```
+
+```{r, echo=FALSE}
+load("tune_res_lm_nba_large.rda")
+best_lm_nba_large<-select_best(tune_res_lm_nba,metric="rmse")
+show_best(tune_res_lm_nba,metric="rmse")%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+
+rmse_vals <- append(rmse_vals,show_best(tune_res_lm_nba_large,metric="rmse")[3])
+model_vals <- append(model_vals, "Linear Regression - Large")
+
+lm_final_nba_large <- finalize_workflow(lm_wkflow_cv_nba_large, best_lm_nba_large)
+
+lm_final_nba_large <- fit(lm_final_nba_large, 
+                        data = nba_data_train)
+
+results <- augment(lm_final_nba_large, new_data = nba_data_test)
+
+rmse_test <- append(rmse_test, rmse_vec(truth = results$Rating, estimate = round(results$.pred)))
+  
+```
+
+### Polynomial Model
+
+We can then do our final linear regression model by utilizng the recipe with polynomial terms to degree 4. Thus, the model with the following RMSE is yielded.
+
+```{r, echo=FALSE}
+poly_mod_cv_nba <- linear_reg() %>%
+  set_engine("lm")
+
+poly_wkflow_cv_nba <- workflow() %>%
+  add_model(poly_mod_cv_nba) %>%
+  add_recipe(nba_recipe_poly)
+
+```
+
+```{r,eval=FALSE, echo=FALSE}
+
+tune_res_poly_nba <- poly_wkflow_cv_nba %>% 
+  fit_resamples(resamples = nba_folds)
+
+save(tune_res_poly_nba, file = "tune_res_poly_nba.rda")
+```
+
+```{r, echo=FALSE}
+load("tune_res_poly_nba.rda")
+
+best_poly_nba<-select_best(tune_res_poly_nba,metric="rmse")
+show_best(tune_res_poly_nba,metric="rmse")%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+
+rmse_vals <- append(rmse_vals,show_best(tune_res_poly_nba,metric="rmse")[3])
+model_vals <- append(model_vals, "Linear Regression - Polynomial")
+
+poly_final_nba <- finalize_workflow(poly_wkflow_cv_nba, best_poly_nba)
+
+poly_final_nba <- fit(poly_final_nba, 
+                        data= nba_data_train)
+
+results <- augment(poly_final_nba, new_data = nba_data_test)
+rmse_test <- append(rmse_test, rmse_vec(truth = results$Rating, estimate = round(results$.pred)))
+```
+
+### Model Selection
+
+```{r, echo=FALSE}
+data_frame(model_vals, rmse_vals) %>%
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+```
+
+We can then take the different models and their RMSE values to see that our small model does not work too well, with the large model doing the best. However, from this, we are worried about overfitting, so we can look at the RMSE values for the testing data.
+
+```{r, echo=FALSE}
+data_frame(model_vals, rmse_test) %>%
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+```
+
+From this, we notice that our larger model does overfit as we may have hypothesized, so we can focus on utilizing our default and polynomial models for our additional models.
+
+## Additional Models
+
+### K-Nearest Neighbors
+
+We can then fit our default recipe to a k-nearest neighbor model, where we can tune on neighbors from 1 to 80. We'll walk through the code to show how we tune our more complex models.
+
+We setup our model the same way but using the `nearest_neighbor()` function with engine `kknn`. We do the same thing by making the workflow contain both the model and the recipe.
+
+```{r}
+knn_mod_cv_nba <- nearest_neighbor(neighbors = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("kknn")
+
+knn_wkflow_cv_nba <- workflow() %>% 
+  add_model(knn_mod_cv_nba) %>% 
+  add_recipe(nba_recipe)
+```
+
+Here, we tune the model to a grid from 1 to 80 with 80 levels, to iterate through the different values for neighbors with the different folds for cross validation as well. We save this tuned grid to load back in later.
+
+```{r,eval=FALSE}
+neighbors_grid <- grid_regular(neighbors(range = c(1, 80)), levels = 80)
+
+tune_res_knn_nba <- tune_grid(
+  object = knn_wkflow_cv_nba, 
+  resamples = nba_folds, 
+  grid = neighbors_grid
+)
+
+save(tune_res_knn_nba, file = "tune_res_knn_nba.rda")
+```
+
+Finally, we'll load our model back, show and select the best model based on rmse, and calculate the rmse for the testing dataset like we did earlier. For models that tune, we'll also include an autoplot of the tuned results.
+
+```{r,fig.align='center'}
+load("tune_res_knn_nba.rda")
+
+autoplot(tune_res_knn_nba)+
+  theme(text=element_text(size=12,  family="Avenir"))
+
+best_knn_nba <- select_best(tune_res_knn_nba,
+                          metric = "rmse",
+                          neighbors
+                          )
+
+show_best(tune_res_knn_nba,
+                          metric = "rmse"
+                          )%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+
+rmse_vals <- append(rmse_vals,show_best(tune_res_knn_nba,metric="rmse")[1,4])
+model_vals <- append(model_vals, "K-Nearest Neighbors")
+
+
+knn_final_nba <- finalize_workflow(knn_wkflow_cv_nba,
+                                      best_knn_nba)
+
+knn_final_nba <- fit(knn_final_nba, 
+                        data = nba_data_train)
+
+results <- augment(knn_final_nba, new_data = nba_data_test)
+
+rmse_test <- append(rmse_test, rmse_vec(truth = results$Rating, estimate = round(results$.pred)))
+```
+
+### Elastic Net Regression - Default Model
+
+We can then run an elastic net regression on our default model tuning for penalty and mixture for values between 0 to 1 in 50 levels. We can ultimately calculate an RMSE value for our best models as shown.
+
+```{r, echo = FALSE}
+en_mod_cv_nba <- linear_reg(penalty = tune(),
+                            mixture = tune()) %>% 
+  set_mode("regression") %>%
+  set_engine("glmnet")
+
+en_wkflow_cv_nba <- workflow() %>% 
+  add_model(en_mod_cv_nba) %>% 
+  add_recipe(nba_recipe)
+```
+
+```{r,eval=FALSE, echo = FALSE}
+en_grid <- grid_regular(penalty(range = c(0.001, 1),
+                                trans = identity_trans()),
+                        mixture(range = c(0, 1)),
+                        levels = 50)
+tune_res_en_nba <- tune_grid(
+  object = en_wkflow_cv_nba, 
+  resamples = nba_folds, 
+  grid = en_grid
+)
+
+save(tune_res_en_nba, file = "tune_res_en_nba.rda")
+```
+
+```{r, echo = FALSE,fig.align='center'}
+load("tune_res_en_nba.rda")
+
+autoplot(tune_res_en_nba)+
+  theme(text=element_text(size=12,  family="Avenir"))
+
+best_en_nba <- select_best(tune_res_en_nba,
+                          metric = "rmse",
+                          )
+show_best(tune_res_en_nba,
+                          metric = "rmse"
+                          )%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+
+rmse_vals <- append(rmse_vals,show_best(tune_res_en_nba,metric="rmse")[1,5])
+model_vals <- append(model_vals, "Elastic Net Regression - Normal")
+
+en_final_nba <- finalize_workflow(en_wkflow_cv_nba,
+                                      best_en_nba)
+
+en_final_nba <- fit(en_final_nba, 
+                        data = nba_data_train)
+
+results <- augment(en_final_nba, new_data = nba_data_test)
+
+rmse_test <- append(rmse_test, rmse_vec(truth = results$Rating, estimate = round(results$.pred)))
+
+```
+
+### Elastic Net Regression - Polynomial Model
+
+We can then run another elastic net regression on our polynomial model tuning for penalty and mixture for values between 0 to 1 in 80 levels. We can ultimately calculate an RMSE value for our best models as shown.
+
+```{r, echo = FALSE}
+enpoly_mod_cv_nba <- linear_reg(penalty = tune(),
+                            mixture = tune()) %>% 
+  set_mode("regression") %>%
+  set_engine("glmnet")
+
+enpoly_wkflow_cv_nba <- workflow() %>% 
+  add_model(en_mod_cv_nba) %>% 
+  add_recipe(nba_recipe_poly)
+```
+
+```{r,eval=FALSE, echo = FALSE}
+enpoly_grid <- grid_regular(penalty(range = c(0.01, 1),
+                                trans = identity_trans()),
+                        mixture(range = c(0, 1)),
+                        levels = 80)
+tune_res_enpoly_nba <- tune_grid(
+  object = enpoly_wkflow_cv_nba, 
+  resamples = nba_folds, 
+  grid = enpoly_grid
+)
+
+save(tune_res_enpoly_nba, file = "tune_res_enpoly_nba.rda")
+```
+
+```{r, echo = FALSE,fig.align='center'}
+load("tune_res_enpoly_nba.rda")
+autoplot(tune_res_enpoly_nba)+
+  theme(text=element_text(size=12,  family="Avenir"))
+best_enpoly_nba <- select_best(tune_res_enpoly_nba,
+                          metric = "rmse",
+                          )
+show_best(tune_res_enpoly_nba,
+                          metric = "rmse"
+                          )%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+
+rmse_vals <- append(rmse_vals,show_best(tune_res_enpoly_nba,metric="rmse")[1,5])
+model_vals <- append(model_vals, "Elastic Net Regression - Polynomial")
+
+enpoly_final_nba <- finalize_workflow(enpoly_wkflow_cv_nba,
+                                      best_enpoly_nba)
+
+enpoly_final_nba <- fit(enpoly_final_nba, 
+                        data = nba_data_train)
+
+results <- augment(enpoly_final_nba, new_data = nba_data_test)
+
+rmse_test <- append(rmse_test, rmse_vec(truth = results$Rating, estimate = round(results$.pred)))
+
+```
+
+### Decision Tree
+
+We can then run a decision tree model on our default recipe tuning for cost_complexity in 20 levels. We can ultimately calculate an RMSE value for our best modes as shown.
+
+```{r, echo = FALSE}
+dt_mod_cv_nba <- decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart") %>% 
+  set_mode("regression")
+
+dt_wkflow_cv_nba <- workflow() %>% 
+  add_model(dt_mod_cv_nba) %>% 
+  add_recipe(nba_recipe)
+```
+```{r, eval=FALSE, echo = FALSE}
+param_grid <- grid_regular(cost_complexity(range = c(-5, 0)), levels = 40)
+conflict_prefer("prune", "generics")
+tune_res_dt_nba <- tune_grid(
+  dt_wkflow_cv_nba, 
+  resamples = nba_folds, 
+  grid = param_grid
+)
+
+save(tune_res_dt_nba, file = "tune_res_dt_nba.rda")
+
+```
+
+```{r, echo = FALSE,fig.align='center'}
+load("tune_res_dt_nba.rda")
+autoplot(tune_res_dt_nba)+
+  theme(text=element_text(size=12,  family="Avenir"))
+best_dt_nba <- select_best(tune_res_dt_nba, metric="rmse")
+show_best(tune_res_dt_nba, metric="rmse")%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+
+rmse_vals <- append(rmse_vals,show_best(tune_res_dt_nba,metric="rmse")[1,4])
+model_vals <- append(model_vals, "Decision Tree")
+
+dt_final_nba <- finalize_workflow(dt_wkflow_cv_nba,
+                                      best_dt_nba)
+
+dt_final_nba <- fit(dt_final_nba, 
+                        data = nba_data_train)
+
+results <- augment(dt_final_nba, new_data = nba_data_test)
+
+rmse_test <- append(rmse_test, rmse_vec(truth = results$Rating, estimate = round(results$.pred)))
+```
+
+### Random Forest
+
+We can then run a random forest model on our default recipe tuning for mtry, trees, and min_n in 5 levels. We can ultimately calculate an RMSE value for our best models as shown.
+
+```{r, echo = FALSE}
+rf_mod_cv_nba <- rand_forest(mtry = tune(), 
+                           trees = tune(), 
+                           min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>% 
+  set_mode("regression")
+
+rf_wkflow_cv_nba <- workflow() %>% 
+  add_model(rf_mod_cv_nba) %>% 
+  add_recipe(nba_recipe)
+```
+
+```{r,eval=FALSE, echo = FALSE}
+rf_grid <- grid_regular(mtry(range = c(1
+                                       , 20)), 
+                        trees(range = c(500, 2000)),
+                        min_n(range = c(1, 20)),
+                        levels = 5)
+
+tune_res_rf_nba <- tune_grid(
+  rf_wkflow_cv_nba, 
+  resamples = nba_folds, 
+  grid = rf_grid
+)
+save(tune_res_rf_nba, file = "tune_res_rf_nba.rda")
+```
+
+```{r, echo = FALSE,fig.align='center'}
+load("tune_res_rf_nba.rda")
+autoplot(tune_res_rf_nba)+
+  theme(text=element_text(size=12,  family="Avenir"))
+best_rf_nba <- select_best(tune_res_rf_nba, metric="rmse")
+show_best(tune_res_rf_nba, metric="rmse")%>% 
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+
+rmse_vals <- append(rmse_vals,show_best(tune_res_rf_nba,metric="rmse")[1,6])
+model_vals <- append(model_vals, "Random Forest")
+
+rf_final_nba <- finalize_workflow(rf_wkflow_cv_nba,
+                                      best_rf_nba)
+
+rf_final_nba <- fit(rf_final_nba, 
+                        data = nba_data_train)
+
+results <- augment(rf_final_nba, new_data = nba_data_test)
+
+rmse_test <- append(rmse_test, rmse_vec(truth = results$Rating, estimate = round(results$.pred)))
+```
+
+## Final Model Selection
+
+We can first look at all of our training RMSE values to decifer that our best models are likely to be one of the polynomial regressions or the random forest model.
+
+```{r, echo = FALSE}
+data_frame(model_vals, rmse_vals) %>%
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+```
+
+From this, we can look at the RMSE values for the test dataset to ensure we aren't overfitting any of our models.
+
+```{r, echo = FALSE}
+data_frame(model_vals, rmse_test) %>%
+  kable()%>% 
+  kable_styling(full_width = F,font_size=12)
+```
+
+Our best model as follows is the linear polynomial regression model. From this, we can compare our predicted values to the actual values for 2K23 to be as follows. For our predicted values, we round them to the nearest integer to reflect an actual 2K Rating.
+
+```{r, echo = FALSE}
+results <- augment(poly_final_nba, new_data = nba_data_test)
+
+tibble(Player=results$Player, Rating = results$Rating, Prediction = round(results$.pred))%>%
+  kable() %>%
+  kable_styling(full_width = T,font_size=12) %>%
+  scroll_box(width = "50%", height = "400px")
+```
+
+We can visualize our results by plotting expected against actual with a line showing a perfect fit.
+
+```{r, echo = FALSE,fig.align='center'}
+predfinal <- tibble(Player=results$Player, Rating = results$Rating, Prediction = round(results$.pred))
+ggplot(predfinal, aes(x=Prediction, y=Rating)) +
+  geom_point(size=2,color="lightblue") +
+  geom_abline(lty = 2) +
+  ggtitle("Actual vs. Predicted 2K Rating") +
+  xlab("Prediction")+ylab("Actual")+
+  theme(text=element_text(size=12,  family="Avenir"))
+```
+
+## Conclusion
+
+After running various models on our dataset, we found that utilizing a model with around half of all the possible parameters provides the best final fit. Models with too few parameters aren't able to fully explain the variability in the data, while models with too many are likely to overfit the data. Thus, we stick to a model centered around the key NBA statistics.
+
+Overall, most of our models perform relatively well, while the k-nearest neighbors and decision tree models struggling a little more. They are the least robust models that we have, only tuning on one parameter, without the simplicity we have in linear models.
+
+As expected, the simple linear models perform well. After all, we wouldn't expect NBA 2K to use any form of crazy algorithm to determine 2K Ratings.
+
+From what we discussed earlier, there is remaining unexplained gaps in our prediction and the actual values, which can be associated with the eye test. Some players, specifically ones with big names, like Stephen Curry, have a significantly higher 2K Rating than the one predicted. This is likely associated with the fact that with all of his past accolades, he is considered a much better player than his stats may represent, explaining our underestimate.
+
+In general, there are more players who are underestimated than overestimated, which can explain that the gap may be filled partially by the intangibles from the eye test.
+
+For future improvements, we want to implement some more of the advanced statistics in the NBA by centering our model around the most important NBA statistics, filling the gaps of variability with more specific and exact advanced statistics with minimized correlation with other statistics.
+
+For the most part, we are using more offensive statistics than defensive, so there would be a bias towards strong offensive players having higher 2K ratings over strong defensive players.
+
+Ultimately, our model does a strong job at predicting 2K ratings, allowing us to expand our model and utilize it for future NBA statistics to predict 2K ratings before the new game comes out.
+
+The future of the NBA is here, a data driven league that helps determines the abilities of different players. We are able to add to the plethora of data analytics that is now available to help provide analysis for player performance.

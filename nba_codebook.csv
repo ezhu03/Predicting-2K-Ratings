@@ -1,0 +1,31 @@
+Parameter, Description
+Player, The name of the player.
+Year, The NBA season the statistics are from.
+Pos, The position that the player plays. Some players have two positions indicated by a dash between the two.
+Age, The age of the player during that season.
+Tm, The team that player plays for that season. There are a total of 30 teams. If a player plays for more than one team, it is referred to as TOT.
+G, The number of games the player plays in.
+GS, The number of games the player starts in.
+MP, The average minutes played per game for the player.
+FG, The average number of field goals made per game.
+FGA, The average number of field goals attempted per game.
+FGP, The overall field goal percentage, defined to be FG/FGA.
+3P, The average number of 3 pointers made per game.
+3PA, The average number of 3 pointers attempted per game.
+3PP, The overall 3 point percentage, defined to be 3P/3PA.
+2P, The average number of 2 pointers made per game.
+2PA, The average number of 2 pointers attempted per game.
+2PP, The overall 2 point percentage, defined to be 2P/2PA.
+eFG, The effective field goal percentage, which weights the point value of each field goal and is defined to be (FG + 0.5 * 3P) / FGA.
+FT, The average number of free throws made per game.
+FTA, The average number of free throws attempted per game.
+FTP, The overall free throw percentage, defined to be FT/FTA.
+ORB, The average number of offensive rebounds per game.
+DRB, The average number of defensive rebounds per game.
+TRB, The average number of rebounds per game, defined to be ORB + DRB.
+AST, The average number of assists per game.
+STL, The average number of steals per game.
+BLK, The average number of blocks per game.
+TOV, The average number of turnover per game.
+PF, The average number of personal fouls per game.
+PTS, The average points per game.
